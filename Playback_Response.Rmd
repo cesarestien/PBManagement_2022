@@ -1,0 +1,637 @@
+---
+title: "PB Management Analysis"
+output: html_document
+author: "Cesar O. Estien, Annemarie van der Marel, & Elizabeth Hobson"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, eval = TRUE, echo = FALSE}
+
+knitr::opts_knit$set(root.dir = "~/Desktop/Field Work Folders/Hobson Lab/Data/", echo = TRUE, eval = FALSE)
+
+```
+
+The purpose of this script is to investigate which auditory cues (hawk, parakeet, or dove calls ) generate stronger behavioral responses which may be useful for management.
+
+Setup:
+
+```{r import-data, eval=TRUE, message=FALSE}
+##setwd and path
+setwd("~/Desktop/Field Work Folders/Hobson Lab/Data/")
+path <- "/Desktop/Field Work Folders/Hobson Lab/Data/"
+
+#install packages needed
+X <- c("cowplot", "readr", "ggplot2", "viridis",  "dplyr", "lavaan", "ordinal", "smooth", "Hmisc",  "emmeans", "ggsignif", "car", "olsrr", "ggpubr", "grid", "lubridate", "Rmisc", "plyr", "tidyverse", "RColorBrewer", "reshape2", "cowplot", "egg", "grid", "MASS", "performance", "see", "AICcmodavg", "stargazer", "piecewiseSEM", "lme4", "lmtest", "emmeans")
+if (length(setdiff(X, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(X, rownames(installed.packages())))
+}
+
+#load packages
+invisible(lapply(X, library, character.only = TRUE))
+
+#read datasheet into R
+raw_data <- read.csv("long_repulsion_playback_results.csv", header = T) #original data frame
+
+#Clean up raw data file by removing unneeded data
+filt_data <- raw_data %>%
+  filter(trial != "pilot") %>%
+  dplyr::select(c(trial, playback, group_response, latency_majority, speaker_loc, observer_group_response, observer_blind))
+
+#add exemplar and call type to the data frame
+pbrepulsion <- read.csv("pb_results.csv") %>% 
+  dplyr::select(trial, playback, call_cat, exemplar) #select these columns and storm theme in a new df
+
+#change trial a to factor
+pbrepulsion$trial <- as.factor(pbrepulsion$trial) 
+
+#join data frames
+repulsion <- left_join(filt_data, pbrepulsion,
+                       by=c("trial", "playback")) 
+```
+## Reformat the Data
+
+Based on the paper format and audience as well, we will collapse invasive and native calls into a "parakeet" column. So, lets reformat the data frame by collapsing invasive and native into one column under "conspecific"
+
+For plotting group_response, we only want to keep those that were seen from the high blind. So let's create a subset with only observations from the high blind.
+
+We want to average the latency majority between the observations and put that in a single data frame, then combine that new average LM with the high_blind df
+
+```{r reformat-data}
+
+#look for 'native' and 'invasive' and replace it with 'conspecific'
+repulsion[repulsion == 'native' | repulsion == 'invasive'] <- 'conspecific'
+
+##create a subset of data with high blind observations only
+high_gr <- repulsion %>%
+  filter(str_detect(observer_blind, "w_high|e_high"))
+
+#average latency between observers into a data frame
+avg_lm <- aggregate(latency_majority ~ trial + playback, repulsion, mean)
+
+#take this lm and put it into high_gr. we need to bind the data frames
+final_df <- merge(high_gr, avg_lm, by = c('trial', 'playback'))
+
+#lets also remove the latency majority that's there to prevent confusion
+final_df <- subset(final_df, select = -(latency_majority.x))
+
+#rename avg_latency to latency majority so i don't have to change aspects of future code
+names(final_df)[9] <- "latency_majority"
+
+#In the interest of trying to explore figures that show dispersal-flocking more explicitly, lets create a new column called "Flight Score". -1 = Flocking, 1 = Dispersal, +/- .5 = half-flock/half-dispersal, and 0 are other behaviors (none, vigilant, and minor movement)
+
+#create a new column for flight score
+final_df$flight_score <- final_df$group_response
+ 
+#Create rules that convert group responses scores into a scale that goes from -1 to 1
+final_df$flight_score <- case_when(
+  (final_df$call_cat == "conspecific" & final_df$flight_score == 3) ~ (-.5),
+  final_df$flight_score < 3 ~ 0,
+  final_df$flight_score == 3 ~ .5,
+  final_df$flight_score == 4 ~ 1)
+
+#create new data frame to for mean
+bird_mean <- aggregate(latency_majority ~ call_cat, final_df, mean)
+
+#get standard deviation for latency for each call category
+sd(final_df$latency_majority, na.rm = TRUE)
+bird_sd <- by(final_df$latency_majority, final_df$call_cat, sd)
+
+#lets create median for ordinal data since that is better than the mean
+flight_median <- aggregate(flight_score ~ call_cat, final_df, median)
+group_median <- aggregate(group_response ~ call_cat, final_df, median)
+
+##Yay!! Let's have control be the one closest to 0 now
+repulsion$call_cat <- factor(repulsion$call_cat,levels = c("control", "conspecific", "predator"))
+final_df$call_cat <- factor(final_df$call_cat,levels = c("control", "conspecific", "predator"))
+
+#ready!
+```
+## Visualizing the Data
+
+Lets look at the data again with medians (for ordinal data), means (for continuous data), and a 'conspecific' call category.
+
+We will also visualize flock dynamics more explicitly.
+
+We will add species icons and edit text for legends (e.g., change size) in Adobe Illustrator
+
+```{r new-plots, eval = TRUE}
+########################################
+#
+#
+# FIGURE X: A summary figure with everything (call type, latency, group response) on it! 
+# (may be supplemental/not use it)
+#
+#########################################
+
+#start with a basic plot showing the raw data for group response based on categories.
+ggplot(final_df, aes(x=call_cat, y=group_response, color= factor(call_cat))) + 
+  geom_point() +
+  xlab("Playback Treatment") + 
+  ylab("Group Response")
+
+#now raw data for latency majority
+ggplot(final_df, aes(x=call_cat, y=latency_majority, color= factor(call_cat))) + 
+  geom_point() +
+  xlab("Playback Treatment") + 
+  ylab("Time to Return to Normal Behavior (s)")
+
+#Let's add a box plot and swap the axes.
+ggplot(final_df,aes(x=call_cat,y=group_response, fill = call_cat)) +
+  geom_boxplot(width = .1, outlier.shape = NA) +
+  geom_point(position = position_jitter(width = .15), size = .25) +
+  ylab('Group Response') +
+  xlab('Call Type') + 
+  coord_flip() + 
+  theme_cowplot() + 
+  guides(fill = FALSE, colour = FALSE) 
+
+#Now lets nest group response into the graph as the shape of points while plotting LM vs call_cat
+ggplot(final_df, aes(y=call_cat, x = latency_majority)) + #show raw data
+  geom_boxplot(width = .1, outlier.shape = NA, fill = c("#FFF68F", "#C1FFC1", "#FFC1C1")) +
+  geom_point(aes(shape = as.factor(group_response), col = call_cat)) + #shape is group response. have to change to factor
+  theme_classic() +
+  xlim(c(0, 110)) +
+  labs(x = "Time to Return to Normal Behavior (s)", y = "Call Type") +
+  scale_size(name = "Group Response") +
+  scale_colour_manual(guide = "none", 
+                      values = c("#CD9B1D", "#008B00", "#8B3A3A")) #change dot colors
+
+#Looks good! Now, we need to edit the legend :)
+ggplot(final_df, aes(y=call_cat, x = latency_majority)) + #show raw data
+  geom_boxplot(width = .1, outlier.shape = NA, fill = c("#FFF68F", "#C1FFC1", "#FFC1C1")) +
+  geom_point(aes(shape = as.factor(group_response), col = call_cat)) + #shape is group response. have to change to factor
+  theme_classic() +
+  xlim(c(0, 110)) +
+  labs(x = "Time to Return to Normal Behavior (s)", y = "Call Type") +
+  scale_size(name = "Group Response") +
+  scale_colour_manual(guide = FALSE,
+                      values = c("#CD9B1D", "#008B00", "#8B3A3A")) + #change dot colors
+  scale_shape(name = "Behavioral Response", 
+              labels = c("None", "Vigilent", "Minor Movement","Less than 50% Fly","All Birds in Flight"))
+
+##Re-plot it
+ggplot(final_df, aes(y=call_cat, x = latency_majority)) + #show raw data
+  geom_boxplot(width = .15, outlier.shape = NA, fill = c("#FFF68F", "#C1FFC1", "#FFC1C1")) + #change colors
+  geom_point(aes(shape = as.factor(group_response), col = call_cat, alpha = .3)) + #shape is group response (have to change to factor). make points a bit more opaque
+  theme_classic() +
+  xlim(c(0, 110)) +
+  labs(x = "Time to Return to Normal Behavior (s)", y = "Call Type") +
+  scale_size(guide = FALSE,
+             name = "Group Response") +
+  scale_alpha(guide = FALSE) +
+  scale_colour_manual(guide = FALSE,
+                      values = c("#CD9B1D", "#008B00", "#8B3A3A")) + #change dot colors
+  scale_shape(name = "Behavioral Response", 
+              labels = c("None", "Vigilent", "Minor Local Movement","50% Fly","All Birds Fly"))
+
+##let's offset the data from the boxplot by using jitter and use colorblind friendly colors
+ggplot(final_df, aes(y=latency_majority, x = call_cat)) + #show raw data
+  geom_boxplot(width = .1, outlier.shape = NA, fill = c("#9E93B5", "#4D8CF3", "#E3B152"))+
+   geom_jitter(aes(shape = as.factor(group_response), col = call_cat, 
+                 x = as.numeric(call_cat) + .15, alpha = .2), size = 4, width = .35) +
+  theme_classic() +
+  ylim(c(-1, 90)) +
+  labs(x = "Call Type", y = "Time to Return to Normal Behavior (s)") +
+  scale_alpha(guide = FALSE) +
+  scale_colour_manual(guide = FALSE,
+                      values = c("#9E93B5", "#1F55AE", "#905928")) + #change dot colors
+    scale_shape_manual(name = "Behavioral Response", #legend title
+      values=c(16, 17, 15, 3, 4), #change shapes
+      labels = c("None", "Vigilent", "Minor Movement","Less than 50% Fly","All Birds in Flight")) + #change labels in legend
+  coord_flip() # flip x and y axes
+
+#now lets add mean and use geom point instead + add jitter within geom_point
+ggplot(final_df, aes(y=latency_majority, x = call_cat)) + #show raw data
+  geom_boxplot(width = .1, outlier.shape = NA, fill = c("#9E93B5", "#4D8CF3", "#E3B152"))+
+  geom_point(data = bird_mean, shape = 18, size = 7) +
+  geom_point(aes(shape = as.factor(group_response), col = call_cat, 
+               x = as.numeric(call_cat) + .15, alpha = .2), size = 4, position = position_jitterdodge(dodge.width = 1, jitter.width = 0.6)) + #shape is group response (have to change to factor). make points a bit more opaque 
+  theme_classic() +
+  ylim(c(-1, 90)) +
+  labs(x = "Call Type", y = "Time to Return to Normal Behavior (s)") +
+  scale_alpha(guide = FALSE) +
+  scale_colour_manual(guide = FALSE,
+                      values = c("#9E93B5", "#1F55AE", "#905928")) + #change dot colors
+    scale_shape_manual(name = "Behavioral Response", #legend title
+      values=c(16, 17, 15, 3, 4), #change shapes
+      labels = c("None", "Vigilent", "Minor Movement","50% Birds Fly","All Birds Fly")) + #change labels in legend
+  coord_flip() 
+
+###good summary plot for everything! maybe fix the shapes for responses.
+###likely won't use but good to have
+
+########################################################
+#
+#
+# FIGURE X: Now, lets do call_cat vs group response and call_cat vs latency majority.
+# We're going to combine the same x-axis and flip it so it's shown on the y-axis.
+#
+#
+###########################################################
+
+#plot the graphs we want individually first.
+
+##First latency_majority
+plot1 <- ggplot(final_df, aes(x=call_cat, y = latency_majority)) + #show raw data
+  geom_boxplot(width = .1, outlier.shape = NA, fill = c("#9E93B5", "#4D8CF3", "#E3B152")) +
+  geom_point(aes(col = call_cat, alpha = .1, x = as.numeric(call_cat) + .15, size = 4), position = position_jitterdodge(dodge.width = 1, jitter.width = 0.5)) + #make points a bit more opaque, offset points
+  geom_point(data = bird_mean, shape = 18, size = 7) +
+  theme_classic() +
+  ylim(c(-1, 90)) +
+  labs(y = "Time to Return to Normal Behavior (s)") + #, x = "Call Type") +
+     theme(axis.text.y = element_blank(), #take away text, title, and ticks
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank()) +
+  scale_alpha(guide = FALSE) +
+  scale_size(guide = FALSE) +
+  scale_colour_manual(guide = FALSE,
+                      #name = "Call Type",
+                      values = c("#9E93B5", "#1F55AE", "#905928")) + #change dot colors
+  coord_flip()
+plot1
+
+##Then Group Response
+plot2 <- ggplot(final_df, aes(x=call_cat, y = group_response)) + #show raw data
+  geom_boxplot(width = .1, outlier.shape = NA, fill = c("#9E93B5", "#4D8CF3", "#E3B152")) +
+  geom_point(aes(col = call_cat, alpha = .1, x = as.numeric(call_cat) + .15, size = 4), position = position_jitterdodge(dodge.width = 1, jitter.width = 0.6)) + #make points a bit more opaque, bigger, and offset
+  geom_point(data = group_median, shape = 18, size = 7) + #add median instead of mean
+  theme_classic() +
+  labs(y = "Group Response" ,  y = "Call Type") +
+    #theme(axis.text.y = element_blank(), #take away text, title, and ticks
+     #   axis.ticks.y = element_blank(),
+      #  axis.title.y = element_blank()) +
+  scale_alpha(guide = FALSE) +
+  scale_size(guide = FALSE) +
+  scale_colour_manual( guide = FALSE,
+    #name = "Call Type",
+    values = c("#9E93B5", "#1F55AE", "#905928")) +
+     coord_flip()
+plot2
+
+#Now, we need to combine them!
+cowplot::plot_grid(plot2, plot1, align = "h", ncol = 1)
+egg::ggarrange(plot2, plot1, widths = c(1, 1)) 
+
+############################################
+#
+#
+# Figure S1: Habituation Figure; Plot Group Responses over Trials
+#
+#
+############################################
+
+#graph behavioral responses on y axis and trials on x, with playback type plotted in color and shape to see if the response diminished over time
+
+ggplot(final_df, aes(y=as.numeric(group_response), x = as.numeric(trial))) + #show raw data
+   geom_point(aes(col = call_cat, shape = call_cat, alpha = 0.1, size = 9), position = position_jitterdodge(dodge.width = .5, jitter.width = 0.6))  + #shape is group response (have to change to factor). make points a bit more opaque 
+  geom_smooth(aes(col = call_cat),
+              method = "lm",
+              se = FALSE) +
+  theme_classic() +
+  labs(x = "Trial", y = "Group Response") +
+  scale_alpha(guide = FALSE) +
+  scale_size(guide = FALSE) +
+  scale_colour_manual(name = "Call Type",
+                      values = c("#9E93B5", "#1F55AE", "#905928")) #change dot colors
+
+############################################
+#
+#
+# Figure S2: Habituation Figure; Plot Latency over Trials
+#
+#
+############################################
+
+#graph behavioral responses on y axis and trials on x, with playback type plotted in color and shape to see if the response diminished over time
+
+ggplot(final_df, aes(y=latency_majority, x = as.numeric(trial))) + #show raw data
+   geom_point(aes(col = call_cat, shape = call_cat, alpha = 0.1, size = 9), position = position_jitterdodge(dodge.width = .5, jitter.width = 0.6))  + #shape is group response (have to change to factor). make points a bit more opaque 
+  geom_smooth(aes(col = call_cat),
+              method = "lm",
+              se = FALSE) +
+  theme_classic() +
+  labs(x = "Trial", y = "Time to Return to Normal Behavior (s)") +
+  scale_alpha(guide = FALSE) +
+  scale_size(guide = FALSE) +
+  scale_colour_manual(name = "Call Type",
+                      values = c("#9E93B5", "#1F55AE", "#905928")) #change dot colors
+
+###########################################
+#
+#
+# Figure X: Visualize Repulsion and Attraction Behaviors 
+#
+#
+###########################################
+
+#Basic plot 
+ggplot(final_df, aes(x = call_cat, y = flight_score)) +
+  geom_point(aes(size = 4)) +
+  theme_classic() +
+  ylim(c(-1.0,1.0)) +
+  labs( x = "Call Type", y = "Flock-Dispersal") +
+  scale_size(guide = FALSE) +
+  scale_colour_manual(name = "Call Type",
+                      values = c("#9E93B5", "#1F55AE", "#905928"))
+
+#play with colors, add median, jitter,  and dashed line
+ggplot(final_df) +
+  aes(x = call_cat, y = flight_score, colour = call_cat) +
+   geom_point(aes(alpha = 0.1, size = .5), position = position_jitterdodge(dodge.width = .5, jitter.width = 0.6)) +
+  geom_point(data = flight_median, shape = 18, size = 7, color = "black") +
+  theme_classic() +
+  xlab("Call Type") + 
+  ylab("Flight Score") +
+  ylim(c(-1.0, 1.0)) +
+  geom_hline(yintercept = 0, linetype = 'dashed') + #add dashed line
+  scale_color_hue(guide = FALSE) + 
+  scale_size(guide = FALSE) +
+  scale_alpha(guide = FALSE)
+
+#add boxplots now
+ggplot(final_df) +
+  aes(x = call_cat, y = flight_score, colour = call_cat) +
+  geom_boxplot(width = .1, outlier.shape = NA, fill = c("#9E93B5", "#4D8CF3", "#E3B152")) +
+   geom_point(aes(alpha = 0.1, size = .5), position = position_jitterdodge(dodge.width = .5, jitter.width = 0.6)) +
+  geom_point(data = flight_median, shape = 18, size = 7, color = "black") +
+  theme_classic() +
+  xlab("Call Type") + 
+  ylab("Flight Score") +
+  ylim(c(-1.0, 1.0)) +
+  geom_hline(yintercept = 0, linetype = 'dashed') +
+  scale_color_hue(guide = FALSE) +
+  scale_size(guide = FALSE) +
+  scale_colour_manual( guide = FALSE,
+    #name = "Call Type",
+    values = c("#9E93B5", "#1F55AE", "#905928"))
+
+##Move conspecific to middle, change colors for box plot outline
+final_df$call_cat <- factor(final_df$call_cat,levels = c("control", "conspecific", "predator"))
+
+#replot and remove legend
+ggplot(final_df, aes(x = call_cat, y = flight_score)) + 
+  geom_boxplot(width = .1, outlier.shape = NA, fill = c("#9E93B5", "#4D8CF3", "#E3B152")) +
+   geom_point(aes(col = call_cat, alpha = 0.1, size = .5), position = position_jitterdodge(dodge.width = .5, jitter.width = 0.6)) +
+  geom_point(data = flight_median, shape = 18, size = 7, color = "black") +
+  theme_classic() +
+  xlab("Call Type") + 
+  ylab("Flight Score") +
+  ylim(c(-1.0, 1.0)) +
+  geom_hline(yintercept = 0, linetype = 'dashed') +
+  scale_alpha(guide = FALSE) +
+  scale_color_hue(guide = FALSE) +
+  scale_size(guide = FALSE) +
+  scale_colour_manual( guide = FALSE,
+    #name = "Call Type",
+    values = c("#9E93B5", "#1F55AE", "#905928"))
+
+#########################################################
+#
+#
+# Figure X: Behavioral responses as % in bar plots rather than raw data with box plots
+#
+#
+###############################################################
+
+#make stacked bar plot
+ggplot(final_df, aes(x = call_cat, y = group_response, fill = group_response)) +
+  geom_col(position = "fill") +
+  labs(x = "Call Type", y = "Proportion of Group Response") +
+  theme_classic() +
+  coord_flip()
+
+#add levels so that it plots in order from 0-4
+final_df_barplot <- final_df
+final_df_barplot$response <- factor(final_df_barplot$group_response, 
+       levels = rev(c("0", "1", "2", "3", "4")))
+       #labels = c("None", "Vigilent", "Minor Movement", "50% Birds Fly", "All Birds Fly"))
+
+#Final Plot
+ggplot(final_df_barplot, aes(x = call_cat, fill = response)) +
+  geom_bar(position = "fill") +
+  labs(x = "Call Type", y = "Proportion of Group Response") +
+  theme_classic() +
+  scale_fill_manual(values = c("0" = "#E4E8FF",
+                               "1" = "#B0B7E6",
+                               "2" = "#6C7BE2",
+                               "3" = "#384CDA",
+                               "4" = "#0D20A2")) +
+  coord_flip()
+
+```
+#Model Fitting: 
+
+We will use ordinal package to test group_response and call_cat, linear mixed models for latency, and Kruskal–Wallis to examine significance for flight response.
+
+Due to previous model runs, we know observer has no significant influence so we will remove observer from the model. Additionally, to see if trial has an influence on response and latency, we will remove trial as a random factor and make it a core part of the model. Only exemplar will be a random effect now
+
+
+```{r Ordinal-Model, eval = TRUE}
+########################################
+#
+##Ordinal Model - Group Response 
+#
+####################################
+
+#Create a data frame for modeling
+repulsion2 <- final_df 
+
+#change variables to factors
+repulsion2$exemplar <- as.factor(repulsion2$exemplar)
+repulsion2$response <- ordered(repulsion2$group_response) #ordered factor
+#reorder levels 
+repulsion2$call_cat <- factor(repulsion2$call_cat, levels=c("control", "conspecific", "predator"))
+
+#Run Models
+ordinal_1 <- clmm(repulsion2$response ~ repulsion2$call_cat + (1|repulsion2$exemplar))
+ordinal_2 <- clmm(repulsion2$response ~ repulsion2$call_cat + repulsion2$trial + (1|repulsion2$exemplar))
+ordinal_3 <- clmm(repulsion2$response ~ repulsion2$trial + (1|repulsion2$exemplar))
+ordinal_null <- clmm(repulsion2$response ~ 1 + (1|repulsion2$exemplar))
+
+#compare models
+AIC(ordinal_1, ordinal_2, ordinal_3, ordinal_null) 
+
+#ordinal 1 is the top model with exemplar as random factor! 
+summary(ordinal_1) #trial has no effect, predator is significant
+
+#perform likelihood test on null and selected model
+anova(ordinal_1, ordinal_null) #significant. p-value, LR stat
+
+#get confidence intervals
+confint(ordinal_1, level = 0.95) #predator is significant 
+
+
+#Run Tukey to examine significance between call types for group response (#https://rcompanion.org/handbook/G_12.html)
+
+marginal_ord = emmeans(ordinal_1, "call_cat") #define model we're looking at
+
+pairs(marginal_ord,
+      adjust="tukey") #run Tukey
+
+#Get R2 values - cannot get R2 from ordinal data. commented out
+#rsquared(ordinal_1) 
+#rsquared(ordinal_2) 
+#rsquared(ordinal_3)
+#rsquared(ordinal_null) 
+
+#Make a list of models with name types 
+gr_AIC_list <- list(ordinal_1, ordinal_2, ordinal_3, ordinal_null)
+gr_model_names <- c("Call Type", "Call Type + Trial", "Trial", "Null")
+gr_AIC_table <- aictab(gr_AIC_list, gr_model_names)
+
+#Export
+write.csv(gr_AIC_table, "gr_AIC.csv")
+
+
+####################################
+#
+# Flight Score: we'll run Kruskal–Wallis one-way analysis of variance 
+#
+####################################
+
+kruskal.test(flight_score ~ call_cat, data = repulsion2) #significant!
+
+#where is the significance. we'll do a wilcox test
+pairwise.wilcox.test(repulsion2$flight_score, repulsion2$call_cat,
+                 p.adjust.method = "BH")
+
+```
+
+
+```{r Linear-Model, eval = TRUE}
+
+########################################
+#
+# Linear Model - Latency Majority
+#
+#######################################
+
+#Before we can run models, we need to see what distribution the data follows
+
+#put it in a new data frame
+latency_majority.t <- final_df$latency_majority
+par(mfrow = c(1,1))
+
+#normal model 
+qqp(latency_majority.t, "norm")
+
+#lognormal model
+qqp(latency_majority.t, "lnorm") 
+
+#nbinomial model
+nbinom <- fitdistr(latency_majority.t, "negative binomial") 
+qqp(latency_majority.t, "nbinom", size = nbinom$estimate)
+
+#Poisson
+poisson <- fitdistr(latency_majority.t, "Poisson")
+qqp(latency_majority.t, "pois", lambda = poisson$estimate) 
+
+#Gamma
+gamma <- fitdistr(latency_majority.t, "gamma")
+qqp(latency_majority.t, "gamma", shape = gamma$estimate[[1]], rate = gamma$estimate[[2]]) 
+
+#Since it's normally distributed, we can run a linear mixed model instead of a GLMM using the lme4 package
+
+#create models
+LM_1 <- lmer(repulsion2$latency_majority ~ repulsion2$call_cat + (1|repulsion2$exemplar))
+LM_2 <- lmer(repulsion2$latency_majority ~ repulsion2$call_cat + repulsion2$trial + (1|repulsion2$exemplar))
+LM_3 <- lmer(repulsion2$latency_majority ~ repulsion2$trial + (1|repulsion2$exemplar))
+LM_null <- lmer(repulsion2$latency_majority ~ 1 + (1|repulsion2$exemplar))
+
+#compare models 
+AIC(LM_1, LM_2, LM_3, LM_null) #trial seems to matter since it's in the top model 
+
+#summary of top model
+summary(LM_2) #not giving p-value
+anova(LM_2)
+
+#perform likelihood tests
+
+#compare top model to null 
+anova(LM_2, LM_null)
+
+#is call cat significant? find out by comparing model with call cat to the one without
+anova(LM_2, LM_3) #it is!
+
+#let's do the same for trial to see if trial is actually significant
+anova(LM_2, LM_1) #it's not
+
+#confidence intervals for top model
+confint(LM_2, level = 0.95)
+
+#since there is significance, let's see where it is by using Tukey
+marginal_lat = emmeans(LM_2, "call_cat")
+
+pairs(marginal_lat,
+      adjust="tukey")
+
+#Get rsquare values
+rsquared(LM_1) #0.642909
+rsquared(LM_2) #0.7135345
+rsquared(LM_3) #.09427292
+rsquared(LM_null) #8.433856 x 10^-21
+
+#Make a list of models with name types 
+lat_AIC_list <- list(LM_1, LM_2, LM_3, LM_null)
+lat_model_names <- c("Call Type", "Call Type + Trial", "Trial", "Null")
+lat_AIC_table <- aictab(lat_AIC_list, lat_model_names)
+
+#export
+write.csv(lat_AIC_table, "lat_AIC.csv")
+
+#report chi-squared and p-value
+#example report of it LR test: Λ = 140.5, P < 0.001)
+
+```
+#Use Performance Package
+
+We'll use the performance package to get additional values for models as well as verify the top models.
+
+
+
+```{r Model-Check, eval = TRUE}
+##################################################
+#
+# Performance Package: Checking if the models are good!
+# we can get a bit more information on each model from this (e.g., weight)
+#
+#####################################################
+
+#check fo heteroskedasticity (non-constant error variance) because linear models assume homoscedasticity
+
+#lets check
+lat_lm_hsktest <- lm(repulsion2$latency_majority ~ repulsion2$call_cat)
+check_heteroscedasticity(lat_lm_hsktest) #works!
+
+#compare performance for group response
+compare_performance(ordinal_1, ordinal_2, ordinal_3, ordinal_null) 
+gr_model_compare_table <- compare_performance(ordinal_1, ordinal_2, ordinal_3, ordinal_null) 
+
+#plot
+model_comparison_plot <-plot(compare_performance(ordinal_1, ordinal_2, ordinal_3, ordinal_null, rank = TRUE))
+model_comparison_plot
+
+#export
+write.csv(gr_model_compare_table, "gr_model_comparison.csv")
+
+#compare performance for latency
+compare_performance(LM_1, LM_2, LM_3, LM_null) 
+latency_model_compare_table <- compare_performance(LM_1, LM_2, LM_3, LM_null) 
+```
+#Citations
+
+Export citations
+
+```{r Citations, eval = TRUE}
+# Citations
+citation("rstatix")
+citation("lme4")
+citation("car")
+citation("MASS")
+citation("performance")
+citation("ordinal")
+citation("ggplot2")
+citation("lmtest")
+citation("emmeans")
+```
